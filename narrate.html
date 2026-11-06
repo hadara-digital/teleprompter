@@ -24,6 +24,10 @@ button:disabled { opacity: .45; cursor: default; }
 #start p { margin: 0 0 18px; color: #c9c2f5; font-size: 17px; line-height: 1.45; text-wrap: pretty; }
 .pick { display: flex; align-items: center; justify-content: center; width: 100%; padding: 12px 18px; background: #ff4fa3; color: #1b1442; font-size: 20px; }
 .pick input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+#rescue { margin-bottom: 18px; padding: 14px; border-radius: 16px; background: #2a2160; }
+#rescue[hidden] { display: none; }
+#rescue .alt { background: #3d3470; }
+#rescueText { display: block; margin-bottom: 10px; font-size: 17px; font-weight: 700; line-height: 1.4; text-wrap: pretty; }
 #startError { min-height: 24px; margin-top: 14px; color: #ffc93c; font-size: 17px; font-weight: 700; line-height: 1.4; }
 
 /* the run: the eyes stay on the words, the thumb on the two buttons */
@@ -80,6 +84,7 @@ video#v { max-width: 100%; max-height: 100%; border-radius: 12px; background: #0
 
 <div id="start"><div>
   <h1>קריינות בטלפון</h1>
+  <div id="rescue" hidden><span id="rescueText"></span><div class="after"><button id="rescueSave">לשמור</button><button id="rescueShare" class="alt">לשלוח לדרייב</button></div></div>
   <p id="intro">בוחרים את הסרטון של השיעור מהטלפון. הטלפון יבקש אישור למיקרופון ולמצלמה. ההקלטה נשמרת בטלפון עצמו.</p>
   <label class="pick"><span id="pickLabel">לבחור סרטון</span><input id="file" type="file" accept="video/*,.json,application/json" multiple></label>
   <div id="startError" role="alert"></div>
@@ -111,8 +116,68 @@ video#v { max-width: 100%; max-height: 100%; border-radius: 12px; background: #0
 <script>
 const $ = id => document.getElementById(id);
 const v = $('v');
-let CFG = null, P = [], id = '', released = -1, held = -1, stream = null, rec = null, chunks = [], marks = [], from = 0, t0 = 0, files = [], lock = null, shownPart = -1;
-const TYPE = ['video/mp4;codecs=avc1,mp4a.40.2', 'video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm'].find(t => window.MediaRecorder && MediaRecorder.isTypeSupported(t)) || '';
+let CFG = null, P = [], id = '', released = -1, held = -1, stream = null, rec = null, marks = [], from = 0, t0 = 0, files = [], lock = null, shownPart = -1;
+let take = null, seq = 0, pending = new Map(), lastWrite = Promise.resolve();
+// webm first: it hands over data every second, so a cut take is saved up to the last moment. Chrome's mp4 held 7 seconds in one late piece (6.11.2026)
+const TYPE = ['video/webm;codecs=vp9,opus', 'video/webm', 'video/mp4;codecs=avc1,mp4a.40.2', 'video/mp4'].find(t => window.MediaRecorder && MediaRecorder.isTypeSupported(t)) || '';
+
+// Every second of a take goes to the phone's storage as it is recorded (6.11.2026): a crash or a call loses a second or two, not the take,
+// and a long take does not sit in memory. What could not be written stays in `pending`, so a full or blocked storage still gives a whole take.
+const dbReady = new Promise(res => {
+  try {
+    const q = indexedDB.open('narration-takes', 1);
+    q.onupgradeneeded = () => { q.result.createObjectStore('takes', { keyPath: 'key' }); q.result.createObjectStore('chunks', { keyPath: ['key', 'i'] }); };
+    q.onsuccess = () => res(q.result);
+    q.onerror = () => res(null);
+  } catch (e) { res(null); }
+});
+async function inStore(store, mode, work) {
+  const db = await dbReady;
+  return new Promise((res, rej) => {
+    const t = db.transaction(store, mode), r = work(t.objectStore(store));
+    t.oncomplete = () => res(r.result);
+    t.onerror = t.onabort = () => rej(t.error);
+  });
+}
+const chunksOf = key => IDBKeyRange.bound([key], [key, []]);
+const writeMeta = () => { const t = take; lastWrite = lastWrite.then(() => inStore('takes', 'readwrite', s => s.put({ ...t, marks }))).catch(() => {}); };
+function writeChunk(i, blob) {
+  const key = take.key;
+  pending.set(i, blob);
+  lastWrite = lastWrite.then(() => inStore('chunks', 'readwrite', s => s.put({ key, i, blob }))).then(() => pending.delete(i)).catch(() => {});
+}
+// what reached the storage, together with what did not, in the order it was recorded
+async function blobsOf(key) {
+  const stored = await dbReady ? await inStore('chunks', 'readonly', s => s.getAll(chunksOf(key))).catch(() => []) : [];
+  const byIndex = new Map(stored.map(c => [c.i, c.blob]));
+  pending.forEach((blob, i) => byIndex.set(i, blob));
+  return [...byIndex.keys()].sort((a, b) => a - b).map(i => byIndex.get(i));
+}
+async function forget(key) {
+  await inStore('chunks', 'readwrite', s => s.delete(chunksOf(key)));
+  await inStore('takes', 'readwrite', s => s.delete(key));
+}
+const allTakes = async () => await dbReady ? inStore('takes', 'readonly', s => s.getAll()) : [];
+function filesOf(t, blobs, list = marks) {
+  return [new File(blobs, t.name, { type: t.type }),
+    new File([JSON.stringify({ take: t.name, marks: list })], t.id + '-סימונים-' + t.key + '.json', { type: 'application/json' })];
+}
+
+// a take that was cut off (a crash, a closed page): offered on the next visit, and kept until it is saved
+allTakes().then(async takes => {
+  const t = takes.filter(x => !x.done).sort((a, b) => b.key - a.key)[0];
+  if (!t) return;
+  const blobs = await blobsOf(t.key);
+  if (!blobs.length) { await forget(t.key); return; }
+  const found = filesOf(t, blobs, t.marks || []);
+  const seconds = (t.marks || []).reduce((m, x) => Math.max(m, x.t), 0);
+  $('rescueText').textContent = 'נמצאה הקלטה שנקטעה באמצע: שיעור ' + t.id + ', אורך ' + Math.floor(seconds / 60) + ':' + String(Math.round(seconds % 60)).padStart(2, '0') + '.';
+  const saved = () => { inStore('takes', 'readwrite', s => s.put({ ...t, done: true })).catch(() => {}); $('rescueText').textContent = '✓ ההקלטה נשמרה.'; };
+  $('rescueSave').onclick = () => { saveAll(found); saved(); };
+  $('rescueShare').hidden = !(navigator.canShare && navigator.canShare({ files: found }));
+  $('rescueShare').onclick = () => navigator.share({ files: found }).then(saved).catch(() => {});
+  $('rescue').hidden = false;
+}).catch(() => {});
 
 function isParts(j) { return j && typeof j.video === 'string' && Array.isArray(j.parts) && j.parts.length && j.parts.every(p => p.at < p.until && Array.isArray(p.say)); }
 function setParts(j) { CFG = j; P = j.parts; id = j.video.replace(/\.[^.]+$/, ''); from = j.start || 0; }
@@ -199,28 +264,41 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 async function start() {
   if (!stream) { try { await openDevices(); } catch (e) { say('אין גישה למיקרופון. מאשרים מיקרופון בהגדרות הדפדפן ומנסים שוב.', true); return; } }
   $('after').hidden = true;
-  chunks = []; marks = []; held = -1; released = -1;
+  marks = []; held = -1; released = -1;
   v.currentTime = from;
   const video = stream.getVideoTracks().length > 0;
   const options = TYPE ? { mimeType: video ? TYPE : TYPE.replace('video/', 'audio/').replace(/;.*/, '') } : {};
   if (!video && !MediaRecorder.isTypeSupported(options.mimeType || '')) delete options.mimeType;
   rec = new MediaRecorder(stream, { ...options, videoBitsPerSecond: 2500000, audioBitsPerSecond: 192000 });
-  rec.ondataavailable = e => e.data.size && chunks.push(e.data);
-  rec.onstop = keep;
+  const d = new Date(), pad = n => String(n).padStart(2, '0'), type = rec.mimeType || TYPE || 'video/webm';
+  take = { key: Date.now(), id, type, name: id + '-' + pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds()) + '.' + (/mp4/.test(type) ? 'mp4' : 'webm') };
+  seq = 0; pending = new Map();
+  const stored = await dbReady;
+  if (stored) { navigator.storage?.persist?.(); await forgetOldTakes(); writeMeta(); }
+  rec.ondataavailable = e => { if (!e.data.size) return; writeChunk(seq++, e.data); writeMeta(); };
+  rec.onstop = () => { const cut = !!rec; if (cut) { finishUi(); rec = null; } keep(cut); };
   rec.onstart = () => { t0 = performance.now(); v.play(); marks.push({ t: 0, v: at() }); };
   rec.start(1000);
   $('self').classList.add('live');
   $('go').textContent = 'לעצור'; $('go').classList.add('on'); $('nextPart').disabled = false;
-  say('● מקליטה');
+  say(stored ? '● מקליטה' : '● מקליטה · בלי גיבוי תוך כדי, לא לסגור את העמוד');
   keepAwake();
   (function sync() { if (!rec || rec.state !== 'recording') return; marks.push({ t: now(), v: at() }); setTimeout(sync, 1000); })();
 }
+// the saved takes stay until the next one starts, except the last, in case the download of it did not happen. Cut takes wait to be rescued
+async function forgetOldTakes() {
+  const old = (await allTakes()).filter(t => t.done).sort((a, b) => b.key - a.key).slice(1);
+  for (const t of old) await forget(t.key).catch(() => {});
+}
 function stop() {
   if (!rec) return;
-  v.pause(); held = -1; released = -1; marks.push({ t: now(), v: at(), end: true });
+  finishUi();
   const r = rec; rec = null; r.stop();
+}
+function finishUi() {
+  v.pause(); held = -1; released = -1; marks.push({ t: now(), v: at(), end: true });
   $('self').classList.remove('live');
-  $('go').textContent = 'להתחיל'; $('go').classList.remove('on'); $('nextPart').disabled = true;
+  $('go').textContent = 'להתחיל'; $('go').classList.remove('on'); $('go').disabled = true; $('nextPart').disabled = true;
   from = v.currentTime;   // the next start goes on from here, unless she picks a part
   if (lock) { lock.release().catch(() => {}); lock = null; }
 }
@@ -237,22 +315,24 @@ function nextPart() {
 }
 
 function download(file) { const u = URL.createObjectURL(file), a = document.createElement('a'); a.href = u; a.download = file.name; document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(u), 60000); }
-function saveAll() { files.forEach((f, i) => setTimeout(() => download(f), i * 800)); }
+function saveAll(list) { list.forEach((f, i) => setTimeout(() => download(f), i * 800)); }
 // every take stays on the phone, under the names the laptop already uses: <id>-<time>.webm or .mp4, and <id>-סימונים-<ms>.json
-function keep() {
-  const type = chunks[0]?.type || TYPE || 'video/webm', ext = /mp4/.test(type) ? 'mp4' : 'webm';
-  const d = new Date(), p = n => String(n).padStart(2, '0');
-  const name = id + '-' + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds()) + '.' + ext;
-  const take = new File(chunks, name, { type });
-  const marksFile = new File([JSON.stringify({ take: name, marks })], id + '-סימונים-' + Date.now() + '.json', { type: 'application/json' });
-  files = [take, marksFile];
-  saveAll();
-  say('✓ נשמר בטלפון · ' + (take.size / 1048576).toFixed(0) + 'MB');
+async function keep(cut) {
+  await lastWrite;
+  // the camera or the mic was taken away (a call): the next start opens them again
+  if (stream && stream.getTracks().some(t => t.readyState === 'ended')) { stream.getTracks().forEach(t => t.stop()); stream = null; $('self').hidden = true; }
+  const t = take, blobs = await blobsOf(t.key);
+  $('go').disabled = false;
+  if (!blobs.length) { say('לא הוקלט כלום. מנסים שוב.', true); return; }
+  files = filesOf(t, blobs);
+  saveAll(files);
+  inStore('takes', 'readwrite', s => s.put({ ...t, marks, done: true })).catch(() => {});
+  say((cut ? 'ההקלטה נקטעה. מה שהוקלט נשמר בטלפון · ' : '✓ נשמר בטלפון · ') + (files[0].size / 1048576).toFixed(0) + 'MB', cut);
   $('after').hidden = false;
   $('share').hidden = !(navigator.canShare && navigator.canShare({ files }));
 }
 $('share').onclick = () => navigator.share({ files }).catch(e => { if (e.name !== 'AbortError') say('השליחה לא הצליחה. הקבצים שמורים בטלפון, בהורדות.', true); });
-$('saveAgain').onclick = saveAll;
+$('saveAgain').onclick = () => saveAll(files);
 $('go').onclick = () => rec ? stop() : start();
 $('nextPart').onclick = nextPart;
 v.addEventListener('ended', () => { if (rec) stop(); });
