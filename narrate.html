@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#1b1442"><meta name="robots" content="noindex">
+<title>קריינות בטלפון</title>
+<!--
+  Narration on the phone, for when Hadar is out with the phone only (6.11.2026: "לפעמים שאני רק עם הפלאפון בחוץ").
+  The same run as build_narrate_page.mjs on the laptop: the silent cut plays, the points of the part are on top, the picture waits at
+  the end of each part, and the marks file has the same format. Nothing depends on the laptop or on a connection to it.
+  This page is public, so it holds no course content: the video is picked from the phone, and the parts come from a secret gist
+  (?g=<id>, one JSON file: { video, start, parts: [{ at, until, title, say }] }) or are picked from the phone with the video.
+-->
+<style>
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { margin: 0; height: 100%; background: #1b1442; color: #fff; font-family: system-ui, -apple-system, 'Segoe UI', Rubik, sans-serif; overflow: hidden; }
+button, .pick { font: inherit; font-weight: 700; border: 0; border-radius: 16px; cursor: pointer; min-height: 56px; }
+button:focus-visible, .pick:focus-within { outline: 3px solid #19c6f0; outline-offset: 2px; }
+button:disabled { opacity: .45; cursor: default; }
+
+/* start */
+#start { position: fixed; inset: 0; z-index: 5; background: #1b1442; display: grid; place-items: center; padding: 24px; overflow: auto; }
+#start > div { width: min(420px, 100%); text-align: center; }
+#start h1 { margin: 0 0 8px; font-size: 26px; text-wrap: balance; }
+#start p { margin: 0 0 18px; color: #c9c2f5; font-size: 17px; line-height: 1.45; text-wrap: pretty; }
+.pick { display: flex; align-items: center; justify-content: center; width: 100%; padding: 12px 18px; background: #ff4fa3; color: #1b1442; font-size: 20px; }
+.pick input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+#startError { min-height: 24px; margin-top: 14px; color: #ffc93c; font-size: 17px; font-weight: 700; line-height: 1.4; }
+
+/* the run: the eyes stay on the words, the thumb on the two buttons */
+.app { height: 100%; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto auto;
+  padding: max(8px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(10px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); gap: 8px; }
+.say { position: relative; text-align: center; min-height: 120px; }
+/* her circle and the countdown sit beside the title, so the words below get the full width */
+.title { min-height: 52px; padding-inline: 60px; display: flex; align-items: center; justify-content: center; font-size: 15px; font-weight: 700; color: #19c6f0; }
+.now { font-size: clamp(21px, 5.6vw, 28px); font-weight: 700; line-height: 1.35; white-space: pre-line; text-wrap: pretty; }
+.now.wait { color: #9188c9; }
+.next { margin-top: 4px; font-size: 14px; color: #a79ee0; white-space: pre-line; min-height: 1.3em; }
+.count { position: absolute; top: 3px; left: 0; font-size: 46px; font-weight: 800; color: #ffc93c; line-height: 1; }
+.self { position: absolute; top: 0; right: 0; width: 52px; height: 52px; border-radius: 50%; object-fit: cover; transform: scaleX(-1); border: 3px solid #7b5cff; background: #000; }
+.self.live { border-color: #ff4fa3; }
+.self[hidden] { display: none; }
+.frame { position: relative; display: flex; justify-content: center; align-items: center; min-height: 0; }
+video#v { max-width: 100%; max-height: 100%; border-radius: 12px; background: #000; display: block; }
+.waitmsg { position: absolute; inset-inline: 0; bottom: 8px; margin: auto; width: fit-content; padding: 6px 14px; border-radius: 99px; background: #ffc93c; color: #1b1442; font-size: 15px; font-weight: 800; }
+.waitmsg[hidden] { display: none; }
+.bar { height: 5px; background: #2a2160; border-radius: 3px; overflow: hidden; }
+.bar i { display: block; height: 100%; width: 0; background: #19c6f0; }
+.parts { display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none; padding-block: 2px; }
+.parts button { flex: none; min-height: 44px; padding: 0 14px; border-radius: 99px; background: #2a2160; color: #d6d0f8; font-size: 15px; font-weight: 600; white-space: nowrap; }
+.parts button.cur { background: #7b5cff; color: #fff; }
+.ctl { display: grid; gap: 8px; }
+.row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+#go { background: #ff4fa3; color: #1b1442; font-size: 20px; }
+#go.on { background: #ffc93c; }
+#nextPart { background: #3d3470; color: #fff; font-size: 20px; }
+#status { min-height: 22px; font-size: 15px; font-weight: 700; color: #c9c2f5; text-align: center; }
+#status.bad { color: #ffc93c; }
+.after { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.after[hidden] { display: none; }
+.after button { background: #7ce38b; color: #12301a; font-size: 17px; min-height: 48px; }
+.after button.alt { background: #2a2160; color: #fff; }
+
+/* a phone held sideways: the words beside the picture, the buttons under the words */
+@media (orientation: landscape) and (max-height: 520px) {
+  .app { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto auto; gap: 6px 12px; }
+  .say { grid-column: 1; grid-row: 1; min-height: 0; overflow: auto; }
+  .title { min-height: 44px; }
+  .self { width: 44px; height: 44px; }
+  .count { font-size: 38px; }
+  .now { font-size: 19px; line-height: 1.3; }
+  .next { font-size: 13px; margin-top: 2px; }
+  .row button { min-height: 48px; }
+  .frame { grid-column: 2; grid-row: 1 / 4; }
+  .under { grid-column: 1; grid-row: 2; min-width: 0; }
+  .ctl { grid-column: 1; grid-row: 3; }
+  #status { min-height: 0; }
+}
+@media (prefers-reduced-motion: no-preference) { .bar i { transition: width .15s linear; } }
+</style></head><body>
+
+<div id="start"><div>
+  <h1>קריינות בטלפון</h1>
+  <p id="intro">בוחרים את הסרטון של השיעור מהטלפון. הטלפון יבקש אישור למיקרופון ולמצלמה. ההקלטה נשמרת בטלפון עצמו.</p>
+  <label class="pick"><span id="pickLabel">לבחור סרטון</span><input id="file" type="file" accept="video/*,.json,application/json" multiple></label>
+  <div id="startError" role="alert"></div>
+</div></div>
+
+<div class="app">
+  <div class="say">
+    <video class="self" id="self" muted playsinline hidden></video>
+    <div class="count" id="count"></div>
+    <div class="title" id="title"></div>
+    <div class="now" id="now"></div>
+    <div class="next" id="next"></div>
+  </div>
+  <div class="frame">
+    <video id="v" muted playsinline preload="auto"></video>
+    <div class="waitmsg" id="wait" hidden>מדברים כמה שבא לך · סיימת? הבא</div>
+  </div>
+  <div class="under">
+    <div class="bar"><i id="bar"></i></div>
+    <div class="parts" id="parts"></div>
+  </div>
+  <div class="ctl">
+    <div id="status" role="status"></div>
+    <div class="row"><button id="go">להתחיל</button><button id="nextPart" disabled>הבא</button></div>
+    <div class="after" id="after" hidden><button id="share">לשלוח לדרייב</button><button id="saveAgain" class="alt">לשמור שוב</button></div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const v = $('v');
+let CFG = null, P = [], id = '', released = -1, held = -1, stream = null, rec = null, chunks = [], marks = [], from = 0, t0 = 0, files = [], lock = null, shownPart = -1;
+const TYPE = ['video/mp4;codecs=avc1,mp4a.40.2', 'video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm'].find(t => window.MediaRecorder && MediaRecorder.isTypeSupported(t)) || '';
+
+function isParts(j) { return j && typeof j.video === 'string' && Array.isArray(j.parts) && j.parts.length && j.parts.every(p => p.at < p.until && Array.isArray(p.say)); }
+function setParts(j) { CFG = j; P = j.parts; id = j.video.replace(/\.[^.]+$/, ''); from = j.start || 0; }
+
+// the parts: a secret gist (?g=id), else a JSON file picked with the video
+const gist = new URLSearchParams(location.search).get('g');
+if (gist) fetch('https://api.github.com/gists/' + encodeURIComponent(gist)).then(r => r.json()).then(j => {
+  const parts = JSON.parse(Object.values(j.files)[0].content);
+  if (!isParts(parts)) throw 0;
+  setParts(parts);
+  $('intro').textContent = 'השיעור ' + id + ' מוכן, ' + P.length + ' חלקים. ' + $('intro').textContent;
+}).catch(() => { $('startError').textContent = 'לא הצלחתי לטעון את חלקי השיעור. בודקים שיש אינטרנט ופותחים שוב את הקישור, או בוחרים גם את קובץ החלקים מהטלפון.'; });
+
+$('file').onchange = async () => {
+  const picked = [...$('file').files];
+  $('file').value = '';
+  $('startError').textContent = '';
+  const video = picked.find(f => f.type.startsWith('video/') || /\.(mp4|webm|mov|m4v)$/i.test(f.name));
+  const json = picked.find(f => /\.json$/i.test(f.name));
+  if (json) {
+    try { const j = JSON.parse(await json.text()); if (!isParts(j)) throw 0; setParts(j); }
+    catch (e) { $('startError').textContent = 'קובץ החלקים לא תקין. בוחרים אותו שוב.'; return; }
+  }
+  if (!video) { if (CFG) { $('pickLabel').textContent = 'לבחור סרטון'; $('startError').textContent = 'החלקים נטענו. עכשיו בוחרים את הסרטון.'; } else $('startError').textContent = 'לא נבחר סרטון.'; return; }
+  if (!CFG) { $('startError').textContent = 'חסרים חלקי השיעור. פותחים את הקישור של השיעור, או בוחרים גם את קובץ החלקים.'; return; }
+  v.src = URL.createObjectURL(video);
+  v.addEventListener('error', () => { $('startError').textContent = 'הטלפון לא מצליח לפתוח את הסרטון הזה.'; }, { once: true });
+  v.addEventListener('loadedmetadata', () => {
+    // the wrong video would silently desync the whole take
+    if (v.duration + 1 < P[P.length - 1].until) { $('startError').textContent = 'הסרטון קצר ממה ששיעור ' + id + ' צריך. כנראה נבחר סרטון אחר.'; v.removeAttribute('src'); return; }
+    v.currentTime = from;
+    buildParts();
+    $('start').remove();
+    requestAnimationFrame(loop);
+  }, { once: true });
+};
+
+function buildParts() {
+  P.forEach((p, i) => {
+    const b = document.createElement('button');
+    b.textContent = (i + 1) + '. ' + p.title;
+    b.onclick = () => { if (rec) stop(); from = Math.max(0, p.at - 3); v.currentTime = from; };
+    $('parts').append(b);
+  });
+}
+
+function loop() { requestAnimationFrame(loop); draw(); }
+function draw() {
+  const t = v.currentTime;
+  let i = P.findIndex(p => t < p.until);
+  if (i < 0) i = P.length - 1;
+  if (i === released && P[i + 1]) i++;     // on the run-in after "next", the next part is already on the board
+  const p = P[i], before = t < p.at;
+  $('title').textContent = (i + 1) + '/' + P.length + ' · ' + p.title;
+  const text = p.say.join('\n');
+  if ($('now').textContent !== text) $('now').textContent = text;
+  $('now').classList.toggle('wait', before);
+  $('count').textContent = before && p.at - t <= 3 ? Math.ceil(p.at - t) : '';
+  $('next').textContent = P[i + 1] ? 'אחר כך: ' + P[i + 1].say[0] : 'וזהו, הסוף';
+  $('bar').style.width = before ? '0' : Math.min(100, (t - p.at) / (p.until - p.at) * 100) + '%';
+  // the picture waits for her; the edit is stretched to her words later
+  if (rec && !v.paused && released !== i && t >= p.until - 0.05) { v.pause(); held = i; marks.push({ t: now(), v: at(), hold: i }); }
+  $('wait').hidden = !(rec && held === i);
+  [...$('parts').children].forEach((b, j) => b.classList.toggle('cur', j === i));
+  if (i !== shownPart) { shownPart = i; $('parts').children[i].scrollIntoView({ inline: 'center', block: 'nearest' }); }
+}
+const now = () => Math.round(performance.now() - t0) / 1000;
+const at = () => Math.round(v.currentTime * 1000) / 1000;
+
+async function openDevices() {
+  const audio = { echoCancellation: false, noiseSuppression: true, autoGainControl: false };   // outside: the phone's own noise reduction stays on
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio, video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } } });
+    $('self').srcObject = stream; $('self').hidden = false; $('self').play().catch(() => {});
+  } catch (e) {
+    stream = await navigator.mediaDevices.getUserMedia({ audio });   // no camera: voice only is still a good take
+    say('בלי מצלמה: מקליטים רק קול.');
+  }
+}
+function say(text, bad) { $('status').textContent = text; $('status').classList.toggle('bad', !!bad); }
+async function keepAwake() { try { lock = await navigator.wakeLock.request('screen'); } catch (e) {} }
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && rec) keepAwake(); });
+
+async function start() {
+  if (!stream) { try { await openDevices(); } catch (e) { say('אין גישה למיקרופון. מאשרים מיקרופון בהגדרות הדפדפן ומנסים שוב.', true); return; } }
+  $('after').hidden = true;
+  chunks = []; marks = []; held = -1; released = -1;
+  v.currentTime = from;
+  const video = stream.getVideoTracks().length > 0;
+  const options = TYPE ? { mimeType: video ? TYPE : TYPE.replace('video/', 'audio/').replace(/;.*/, '') } : {};
+  if (!video && !MediaRecorder.isTypeSupported(options.mimeType || '')) delete options.mimeType;
+  rec = new MediaRecorder(stream, { ...options, videoBitsPerSecond: 2500000, audioBitsPerSecond: 192000 });
+  rec.ondataavailable = e => e.data.size && chunks.push(e.data);
+  rec.onstop = keep;
+  rec.onstart = () => { t0 = performance.now(); v.play(); marks.push({ t: 0, v: at() }); };
+  rec.start(1000);
+  $('self').classList.add('live');
+  $('go').textContent = 'לעצור'; $('go').classList.add('on'); $('nextPart').disabled = false;
+  say('● מקליטה');
+  keepAwake();
+  (function sync() { if (!rec || rec.state !== 'recording') return; marks.push({ t: now(), v: at() }); setTimeout(sync, 1000); })();
+}
+function stop() {
+  if (!rec) return;
+  v.pause(); held = -1; released = -1; marks.push({ t: now(), v: at(), end: true });
+  const r = rec; rec = null; r.stop();
+  $('self').classList.remove('live');
+  $('go').textContent = 'להתחיל'; $('go').classList.remove('on'); $('nextPart').disabled = true;
+  from = v.currentTime;   // the next start goes on from here, unless she picks a part
+  if (lock) { lock.release().catch(() => {}); lock = null; }
+}
+function nextPart() {
+  if (!rec) return;
+  const t = v.currentTime;
+  let i = P.findIndex(p => t < p.until - 0.05); if (held >= 0) i = held; if (i < 0) i = P.length - 1;
+  held = -1;
+  if (!P[i + 1]) { stop(); return; }          // after the last part: done
+  released = i;                              // this part already waited for her, so it won't hold again on the run-in
+  v.currentTime = Math.max(0, P[i + 1].at - 2.5);   // a short run-in with the 3-2-1
+  marks.push({ t: now(), v: at(), next: i + 1 });
+  v.play();
+}
+
+function download(file) { const u = URL.createObjectURL(file), a = document.createElement('a'); a.href = u; a.download = file.name; document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(u), 60000); }
+function saveAll() { files.forEach((f, i) => setTimeout(() => download(f), i * 800)); }
+// every take stays on the phone, under the names the laptop already uses: <id>-<time>.webm or .mp4, and <id>-סימונים-<ms>.json
+function keep() {
+  const type = chunks[0]?.type || TYPE || 'video/webm', ext = /mp4/.test(type) ? 'mp4' : 'webm';
+  const d = new Date(), p = n => String(n).padStart(2, '0');
+  const name = id + '-' + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds()) + '.' + ext;
+  const take = new File(chunks, name, { type });
+  const marksFile = new File([JSON.stringify({ take: name, marks })], id + '-סימונים-' + Date.now() + '.json', { type: 'application/json' });
+  files = [take, marksFile];
+  saveAll();
+  say('✓ נשמר בטלפון · ' + (take.size / 1048576).toFixed(0) + 'MB');
+  $('after').hidden = false;
+  $('share').hidden = !(navigator.canShare && navigator.canShare({ files }));
+}
+$('share').onclick = () => navigator.share({ files }).catch(e => { if (e.name !== 'AbortError') say('השליחה לא הצליחה. הקבצים שמורים בטלפון, בהורדות.', true); });
+$('saveAgain').onclick = saveAll;
+$('go').onclick = () => rec ? stop() : start();
+$('nextPart').onclick = nextPart;
+v.addEventListener('ended', () => { if (rec) stop(); });
+</script></body></html>

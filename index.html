@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="theme-color" content="#000"><meta name="robots" content="noindex">
+<title>טלפרומפטר</title>
+<!--
+  Hadar's teleprompter (2.11.2026: "תבנה לו גם טלפרומפטר לטלפון", "שיהיה לו טלפרומפטר גם למחשב").
+  One page for the phone and the computer. It films with the device's own camera and keeps every take on the device
+  (no laptop, no Wi-Fi link). The words sit in a narrow column right next to the lens, so the eyes stay on the camera.
+  The texts never live in this page: ?g=<secret gist id> loads them (JSON: [{id, title, text}]), or they are pasted in.
+  Keys on the computer: Space = record/stop, ← = next, → = back, F = full screen.
+-->
+<style>
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { margin: 0; height: 100%; background: #000; color: #fff; font-family: system-ui, -apple-system, 'Segoe UI', Rubik, sans-serif; overflow: hidden; }
+button { font: inherit; border: 0; cursor: pointer; }
+/* the words: a narrow column at the lens. Computer: top centre (the webcam is above the screen). Phone sideways: the lens side */
+#say { position: fixed; z-index: 2; padding: 10px 16px; font-weight: 750; line-height: 1.35; white-space: pre-line; text-align: center; }
+body.desk #say { top: 0; left: 50%; transform: translateX(-50%); width: min(480px, 36vw); font-size: clamp(24px, 2.2vw, 34px); padding-top: 18px; }
+body.phone #say { top: max(6px, env(safe-area-inset-top)); bottom: 6px; width: 44vw; overflow: auto; text-align: start; font-size: clamp(18px, 3.1vw, 28px); }
+body.phone.lens-left #say { left: max(6px, env(safe-area-inset-left)); }
+body.phone.lens-right #say { right: max(6px, env(safe-area-inset-right)); }
+#say .eyes { display: block; font-size: 14px; font-weight: 600; color: #ff4fa3; margin-bottom: 6px; }
+#say .id { display: block; font-size: 15px; font-weight: 600; color: #8f86d6; margin-bottom: 8px; }
+.shirt { font-size: 1.4em; }
+/* everything else away from the lens */
+#side { position: fixed; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+body.desk #side { bottom: 18px; left: 50%; transform: translateX(-50%); }
+body.phone #side { top: max(8px, env(safe-area-inset-top)); bottom: max(8px, env(safe-area-inset-bottom)); width: 50vw; justify-content: space-between; }
+body.phone.lens-left #side { right: max(10px, env(safe-area-inset-right)); }
+body.phone.lens-right #side { left: max(10px, env(safe-area-inset-left)); }
+#me { width: 220px; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 12px; transform: scaleX(-1); background: #111; border: 3px solid #333; }
+body.phone #me { width: 46%; }
+body.rec #me { border-color: #ff2d55; }
+#row { display: flex; align-items: center; gap: 22px; }
+.nav { font-size: 26px; width: 54px; height: 54px; border-radius: 50%; border: 2px solid #444; background: transparent; color: #fff; }
+#rec { width: 84px; height: 84px; border-radius: 50%; border: 5px solid #fff; background: #ff4fa3; color: #fff; font-size: 15px; font-weight: 800; }
+body.rec #rec { background: #ff2d55; animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 50% { transform: scale(.93); } }
+#info { font-size: 15px; color: #aaa; text-align: center; }
+#timer { font-variant-numeric: tabular-nums; color: #ff2d55; font-weight: 800; min-height: 20px; }
+#status { min-height: 22px; font-size: 16px; color: #7ce38b; text-align: center; max-width: 90vw; }
+#status a, #status button { color: #000; background: #7ce38b; padding: 6px 14px; border-radius: 99px; text-decoration: none; font-weight: 700; margin: 4px; display: inline-block; font-size: 15px; }
+/* start / paste screen */
+#start { position: fixed; inset: 0; z-index: 20; background: #0d0a24; display: grid; place-items: center; padding: 24px; text-align: center; }
+#start h1 { margin: 0 0 6px; font-size: 26px; }
+#start p { color: #b9b0f0; margin: 6px 0 16px; font-size: 16px; }
+#start textarea { width: min(640px, 90vw); height: 30vh; border-radius: 14px; border: 2px solid #3d3470; background: #1b1442; color: #fff; font: inherit; font-size: 16px; padding: 12px; }
+#go { font-size: 24px; font-weight: 800; padding: 16px 42px; border-radius: 99px; background: #ff4fa3; color: #fff; margin-top: 14px; }
+#turn { position: fixed; inset: 0; z-index: 30; display: none; place-items: center; text-align: center; padding: 30px; font-size: 26px; font-weight: 700; line-height: 1.5; background: #0d0a24; }
+@media (orientation: portrait) and (max-width: 900px) { body.phone #turn { display: grid; } }
+</style></head><body class="desk">
+<div id="turn">📱↻<br>מסובבים את הטלפון לרוחב<br><span style="font-size:18px;color:#b9b0f0">המילים יופיעו ממש ליד המצלמה</span></div>
+<div id="start"><div>
+  <h1>טלפרומפטר</h1>
+  <p id="loaded">מדביקים את הטקסטים. שורה ריקה בין טקסט לטקסט</p>
+  <textarea id="paste" placeholder="היי! אני הדר&#10;..."></textarea><br>
+  <button id="go">להתחיל לצלם</button>
+  <p style="font-size:14px">המכשיר יבקש אישור למצלמה ולמיקרופון. כל צילום נשמר במכשיר עצמו</p>
+</div></div>
+<div id="say"></div>
+<div id="side">
+  <div id="info"></div>
+  <video id="me" autoplay muted playsinline></video>
+  <div id="timer"></div>
+  <div id="row"><button class="nav" id="prev" aria-label="הקודם">→</button><button id="rec">לצלם</button><button class="nav" id="next" aria-label="הבא">←</button></div>
+  <div id="status"></div>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+const PHONE = matchMedia('(pointer: coarse)').matches && Math.min(screen.width, screen.height) < 900;
+document.body.className = PHONE ? 'phone lens-left' : 'desk';
+let ITEMS = [], at = 0, stream = null, rec = null, chunks = [], t0 = 0, tick = 0;
+const KEY = 'tp-pos-' + (new URLSearchParams(location.search).get('g') || 'paste');
+
+// the texts: a secret gist (?g=id), else pasted
+async function load() {
+  const g = new URLSearchParams(location.search).get('g');
+  if (!g) return;
+  try {
+    const r = await fetch('https://api.github.com/gists/' + encodeURIComponent(g));
+    const j = await r.json();
+    const f = Object.values(j.files)[0];
+    ITEMS = JSON.parse(f.content);
+    $('loaded').textContent = ITEMS.filter(x => !x.shirt).length + ' טקסטים מוכנים';
+    $('paste').hidden = true;
+  } catch (e) { $('loaded').textContent = 'לא הצלחתי לטעון את הטקסטים. אפשר להדביק אותם כאן'; }
+}
+load();
+
+function lensSide() {
+  if (!PHONE) return;
+  const a = screen.orientation && typeof screen.orientation.angle === 'number' ? screen.orientation.angle : (window.orientation || 0);
+  document.body.classList.toggle('lens-left', a === 90);
+  document.body.classList.toggle('lens-right', a !== 90);
+}
+addEventListener('orientationchange', () => setTimeout(lensSide, 200));
+if (screen.orientation) screen.orientation.addEventListener('change', lensSide);
+lensSide();
+
+function show() {
+  const it = ITEMS[at], say = $('say');
+  say.textContent = '';
+  if (it.shirt) { say.innerHTML = '<div class="shirt">👕<br>מחליפים חולצה</div>'; }
+  else {
+    say.innerHTML = '<span class="eyes">👀 מסתכלים למצלמה</span>' + (it.id ? '<span class="id"></span>' : '');
+    if (it.id) say.querySelector('.id').textContent = it.id + (it.title ? ' · ' + it.title : '');
+    say.append(it.text);
+  }
+  const n = ITEMS.slice(0, at + 1).filter(x => !x.shirt).length, total = ITEMS.filter(x => !x.shirt).length;
+  $('info').textContent = n + ' מתוך ' + total + (PHONE ? '' : '   ·   רווח = לצלם/לעצור   ← הבא   → אחורה   F = מסך מלא');
+  try { localStorage.setItem(KEY, at); } catch (e) {}
+}
+function go(d) { if (rec) return; at = Math.max(0, Math.min(ITEMS.length - 1, at + d)); show(); $('status').textContent = ''; }
+$('prev').onclick = () => go(-1);
+$('next').onclick = () => go(1);
+
+$('go').onclick = async () => {
+  if (!ITEMS.length) {
+    ITEMS = $('paste').value.split(/\n\s*\n/).map(t => t.trim()).filter(Boolean).map(text => ({ text }));
+    if (!ITEMS.length) { $('loaded').textContent = 'עוד לא הודבק טקסט'; return; }
+  }
+  try { at = Math.min(ITEMS.length - 1, +localStorage.getItem(KEY) || 0); } catch (e) {}
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'user', width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } },
+      audio: { echoCancellation: false, noiseSuppression: true, autoGainControl: false } });
+    $('me').srcObject = stream;
+  } catch (e) { $('loaded').textContent = 'אין גישה למצלמה: ' + e.message; return; }
+  $('start').remove();
+  show();
+  if (PHONE) { try { await document.documentElement.requestFullscreen(); } catch (e) {} }
+  keepAwake();
+};
+let lock = null;
+async function keepAwake() { try { lock = await navigator.wakeLock.request('screen'); } catch (e) {} }
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && stream) keepAwake(); });
+
+const TYPE = ['video/mp4;codecs=avc1,mp4a.40.2', 'video/mp4;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm'].find(t => window.MediaRecorder && MediaRecorder.isTypeSupported(t)) || '';
+$('rec').onclick = () => { $('rec').blur(); rec ? stop() : start(); };
+function start() {
+  if (!stream || ITEMS[at].shirt) return;
+  chunks = [];
+  rec = new MediaRecorder(stream, TYPE ? { mimeType: TYPE, videoBitsPerSecond: 12000000, audioBitsPerSecond: 192000 } : {});
+  rec.ondataavailable = e => e.data.size && chunks.push(e.data);
+  rec.onstop = keep;
+  rec.start(1000);
+  t0 = Date.now();
+  document.body.classList.add('rec'); $('rec').textContent = 'סיימתי'; $('status').textContent = '';
+  tick = setInterval(() => { const s = Math.round((Date.now() - t0) / 1000); $('timer').textContent = '● ' + Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); }, 250);
+}
+function stop() { rec.stop(); clearInterval(tick); document.body.classList.remove('rec'); $('rec').textContent = 'לצלם'; $('timer').textContent = ''; }
+// every take stays on the device: it downloads right away (Downloads folder), and on the phone it can also be shared (Drive, Quick Share)
+function keep() {
+  const it = ITEMS[at], type = rec.mimeType || TYPE || 'video/webm', ext = /mp4/.test(type) ? 'mp4' : 'webm';
+  rec = null;
+  const d = new Date(), p = n => String(n).padStart(2, '0');
+  const name = (it.id ? it.id + '-' : 'take-') + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds()) + '.' + ext;
+  const file = new File(chunks, name, { type });
+  const url = URL.createObjectURL(file);
+  const a = document.createElement('a'); a.href = url; a.download = name; document.body.append(a); a.click(); a.remove();
+  $('status').innerHTML = '✓ נשמר בהורדות: ' + name + ' (' + (file.size / 1048576).toFixed(0) + 'MB)<br>';
+  const again = document.createElement('a'); again.href = url; again.download = name; again.textContent = 'לשמור שוב'; $('status').append(again);
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    const b = document.createElement('button'); b.textContent = 'לשלוח למחשב'; b.onclick = () => navigator.share({ files: [file] }).catch(() => {}); $('status').append(b);
+  }
+}
+document.addEventListener('keydown', e => {
+  if (!stream) return;
+  if (e.code === 'Space') { e.preventDefault(); rec ? stop() : start(); }
+  if (e.key === 'ArrowLeft') go(1);
+  if (e.key === 'ArrowRight') go(-1);
+  if (e.key === 'f' || e.key === 'F' || e.key === 'כ') document.documentElement.requestFullscreen();
+});
+</script></body></html>
